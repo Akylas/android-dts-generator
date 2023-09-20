@@ -70,8 +70,9 @@ public class DtsApi {
     private Pattern methodSignature = Pattern.compile("\\((?<ArgumentsSignature>.*)\\)(?<ReturnSignature>.*)");
     private Pattern isWordPattern = Pattern.compile("^[\\w\\d]+$");
     private Pattern isVoid = Pattern.compile("V(\\^.*\\;)?");
-    private HashSet<String> warnedMissing = new HashSet<>();
     private int ignoreObfuscatedNameLength;
+    private HashSet<String> warnedMissing = new HashSet<>();
+    private Pattern jsFieldPattern = Pattern.compile("^[a-zA-Z$_][a-zA-Z0-9$_]*$");
 
     public DtsApi(boolean allGenericImplements, InputParameters inputParameters) {
         this.allGenericImplements = allGenericImplements;
@@ -115,7 +116,9 @@ public class DtsApi {
                         currentFileClassname.startsWith("android.support.v4.media.routing.MediaRouterJellybeanMr1") ||
                         currentFileClassname.startsWith("android.support.v4.media.routing.MediaRouterJellybeanMr2") ||
                         currentFileClassname.contains(".debugger.") ||
-                        currentFileClassname.endsWith("package-info")) {
+                        currentFileClassname.endsWith("package-info") ||
+                        currentFileClassname.endsWith("module-info") ||
+                        currentFileClassname.endsWith("Kt")) {
                     continue;
                 }
 
@@ -123,7 +126,8 @@ public class DtsApi {
                 // TODO: optimize
 
                 this.namespaceParts = currentFileClassname.split("\\.");
-                if (isIgnoredNamespace()) {
+                if(isIgnoredNamespace()) {
+                    System.out.println(String.format("Found ignored namespace. %s", String.join(".", this.namespaceParts)));
                     continue;
                 }
 
@@ -913,6 +917,10 @@ public class DtsApi {
             name = "constructor";
         }
 
+        if (!jsFieldPattern.matcher(name).matches()) {
+            name = "\"" + name +"\"";
+        }
+
         return name;
     }
 
@@ -949,12 +957,42 @@ public class DtsApi {
 
         if (shouldIgnoreMember(fieldName)) return;
 
+        //
+        // handle member names that conflict with an inner class. For example:
+        // 
+        // class OuterClass {
+        //   public static InnerClass: OuterClass.InnerClass;
+        // 
+        //   class InnerClass {}   
+        // }
+        //
+        // the static field on the OuterClass will have a field type of OuterClass$InnerClass
+        // which we can check for and skip writing the static field to the definitions
+        // since typescript cannot handle this scenario well.
+        //
+
+        // the name of the field eg. InnerClass
+        String name = f.getName();
+
+        // the type of the field eg. OuterClass$InnerClass
+        String fieldTypeString = this.getFieldType(f).toString();
+
+        // we check if the name matches OuterClass (which we are currently in) + "$" + InnerClass
+        if(fieldTypeString.equals(clazz.getClassName() + "$" + name)) {
+            return;
+        }
+
         String tabs = getTabs(this.indent + 1);
         sbContent.append(tabs + "public ");
         if (f.isStatic()) {
             sbContent.append("static ");
         }
-        sbContent.appendln(f.getName() + ": " + getTypeScriptTypeFromJavaType(this.getFieldType(f), typeDefinition) + ";");
+
+        if (!jsFieldPattern.matcher(name).matches()) {
+            name = "\"" + name + "\"";
+        }
+        
+        sbContent.appendln(name + ": " + getTypeScriptTypeFromJavaType(this.getFieldType(f), typeDefinition) + ";");
     }
 
     private void addClassField(JavaClass clazz) {
@@ -1276,6 +1314,10 @@ public class DtsApi {
     private List<String> getIgnoredNamespaces(){
         // for some reason these namespaces are references but not existing, so we are replacing all types from these namespaces with "any"
         List<String> result = new ArrayList<>();
+
+        result.add("kotlin");
+        result.add("org.jetbrains");
+        result.add("org.intellij");
 
         result.add("android.app.job");
         result.add("android.app.SharedElementCallback");
