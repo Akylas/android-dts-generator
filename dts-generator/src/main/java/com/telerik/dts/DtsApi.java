@@ -528,12 +528,12 @@ public class DtsApi {
             } else {
                 sbContent.append(tabs + "export ");
             }
-            sbContent.appendln("module " + currParts[idx] + " {");
+            sbContent.appendln("namespace " + currParts[idx] + " {");
         }
 
         if (isNested(currClass) && (prevParts.length < currParts.length)) {
             String tabs = getTabs(prevParts.length - 1);
-            sbContent.appendln(tabs + "export module " + prevParts[prevParts.length - 1] + " {");
+            sbContent.appendln(tabs + "export namespace " + prevParts[prevParts.length - 1] + " {");
         }
 
         return indent;
