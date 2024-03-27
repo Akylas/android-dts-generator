@@ -1030,7 +1030,7 @@ public class DtsApi {
         
         sbContent.append(name + ": " + getTypeScriptTypeFromJavaType(this.getFieldType(f), typeDefinition));
         if (f.getConstantValue() != null) {
-            sbContent.appendln( " = " + f.getConstantValue() + ";");
+            sbContent.appendln( "; // " + f.getConstantValue());
         } else {
             sbContent.appendln(";");
 
