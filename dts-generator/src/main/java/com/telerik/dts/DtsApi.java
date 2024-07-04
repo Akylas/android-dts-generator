@@ -6,6 +6,8 @@ import org.apache.bcel.classfile.Attribute;
 import org.apache.bcel.classfile.Field;
 import org.apache.bcel.classfile.FieldOrMethod;
 import org.apache.bcel.classfile.JavaClass;
+import org.apache.bcel.classfile.LocalVariable;
+import org.apache.bcel.classfile.LocalVariableTable;
 import org.apache.bcel.classfile.Method;
 import org.apache.bcel.classfile.Signature;
 import org.apache.bcel.generic.ArrayType;
@@ -73,6 +75,25 @@ public class DtsApi {
     private int ignoreObfuscatedNameLength;
     private HashSet<String> warnedMissing = new HashSet<>();
     private Pattern jsFieldPattern = Pattern.compile("^[a-zA-Z$_][a-zA-Z0-9$_]*$");
+
+    private Set<String> reservedJsKeywords = Set.of(
+        "abstract", "arguments", "await", "boolean",
+        "break", "byte", "case", "catch",
+        "char", "class", "const", "continue",
+        "debugger", "default", "delete", "do",
+        "double", "else", "enum", "eval",
+        "export", "extends", "false", "final",
+        "finally", "float", "for", "function",
+        "goto", "if", "implements", "import",
+        "in", "instanceof", "int", "interface",
+        "let", "long", "native", "new",
+        "null", "package", "private", "protected",
+        "public", "return", "short", "static",
+        "super", "switch", "synchronized", "this",
+        "throw", "throws", "transient", "true",
+        "try", "typeof", "var", "void",
+        "volatile", "while", "with", "yield"
+    );
 
     public DtsApi(boolean allGenericImplements, InputParameters inputParameters) {
         this.allGenericImplements = allGenericImplements;
@@ -149,6 +170,8 @@ public class DtsApi {
                 // process member scope
 
                 mapNameMethod = new HashMap<>();
+
+                loadBaseMethods(currClass); //loaded in "baseMethodNames" and "baseMethods"
 
                 addClassField(currClass);
 
@@ -295,20 +318,22 @@ public class DtsApi {
 
     private static String replaceNonGenericUsage(String content, String className, Integer occurencies, String javalangObject) {
         String result = content;
-        Pattern usedAsNonGenericPattern = Pattern.compile("(?<Prefix>[^a-zA-Z\\d\\s:]*)" + className.replace(".", "\\.") + "(?<Suffix>[^a-zA-Z\\d^\\.^\\$^\\<])");
+        Pattern usedAsNonGenericPattern = Pattern.compile(className.replace(".", "\\.") + "(?<Suffix>[^a-zA-Z\\d^\\.^\\$^\\<])");
         Matcher matcher = usedAsNonGenericPattern.matcher(result);
-        if(matcher.find()) {
-            List<String> arguments = new ArrayList<>();
-            for (int i = 0; i < occurencies; i++) {
-                arguments.add(javalangObject);
-            }
-            String classSuffix = "<" + String.join(",", arguments) + ">";
+        
+        if (!matcher.find())
+            return content;
 
-            System.out.println(String.format("Appending %s to occurrences of class %s without passed generic types", classSuffix, className));
-
-            String replaceString = String.format("$1%s%s$2", className, classSuffix);
-            result = matcher.replaceAll(replaceString);
+        List<String> arguments = new ArrayList<>();
+        for (int i = 0; i < occurencies; i++) {
+            arguments.add(javalangObject);
         }
+        String classSuffix = "<" + String.join(",", arguments) + ">";
+        
+        System.out.println(String.format("Appending %s to occurrences of class %s without passed generic types", classSuffix, className));
+
+        String replaceString = String.format("%s%s$1", className, classSuffix);
+        result = matcher.replaceAll(replaceString);
         return result;
     }
 
@@ -681,8 +706,6 @@ public class DtsApi {
             return;
         }
 
-        loadBaseMethods(clazz); //loaded in "baseMethodNames" and "baseMethods"
-
         String tabs = getTabs(this.indent + 1);
 
         cacheMethodBySignature(method); //cached in "mapNameMethod"
@@ -833,7 +856,7 @@ public class DtsApi {
     }
 
     private void cacheMethodBySignature(Method m) {
-        String methodName = m.getName();
+        String methodName = getMethodFullSignature(m);
         if (!mapNameMethod.containsKey(methodName)) {
             mapNameMethod.put(methodName, m);
         }
@@ -851,28 +874,20 @@ public class DtsApi {
             while (true && currClass != null) {
                 boolean isJavaLangObject = currClass.getClassName().equals(DtsApi.JavaLangObject);
 
-                // two similar code blocks, split up so that checks if method is constructor isnt done on objects that are not java.lang.Object
-                if (isJavaLangObject) {
-                    for (Method m : currClass.getMethods()) {
-                        if (!m.isSynthetic() && (m.isPublic() || m.isProtected())) {
-                            // don't write empty constructor typings for java objects
-                            if(isConstructor(m)) {
-                                continue;
-                            }
-
-                            baseMethods.add(m);
-                            baseMethodNames.add(m.getName());
+                for (Method m : currClass.getMethods()) {
+                    if (!m.isSynthetic() && (m.isPublic() || m.isProtected())) {
+                        // don't write empty constructor typings for java objects
+                        if (isJavaLangObject && isConstructor(m)) {
+                            continue;
                         }
-                    }
 
+                        baseMethods.add(m);
+                        baseMethodNames.add(m.getName());
+                    }
+                }
+                
+                if(isJavaLangObject){
                     break;
-                } else {
-                    for (Method m : currClass.getMethods()) {
-                        if (!m.isSynthetic() && (m.isPublic() || m.isProtected())) {
-                            baseMethods.add(m);
-                            baseMethodNames.add(m.getName());
-                        }
-                    }
                 }
 
                 String scn = currClass.getSuperclassName();
@@ -924,7 +939,10 @@ public class DtsApi {
         return name;
     }
 
-    private String getMethodParamSignature(JavaClass clazz, TypeDefinition typeDefinition, Method m) {
+   private String getMethodParamSignature(JavaClass clazz, TypeDefinition typeDefinition, Method m) {
+        LocalVariableTable table = m.getLocalVariableTable();
+        LocalVariable[] variables = table != null ? table.getLocalVariableTable() : null;
+
         StringBuilder sb = new StringBuilder();
         sb.append("(");
         int idx = 0;
@@ -932,8 +950,26 @@ public class DtsApi {
             if (idx > 0) {
                 sb.append(", ");
             }
-            sb.append("param");
-            sb.append(idx++);
+
+            int localVarIndex = m.isStatic() ? idx : idx + 1; // skip "this" variable name
+            LocalVariable localVariable = variables != null && variables.length > localVarIndex
+                ? variables[localVarIndex]
+                : null;
+
+            if (localVariable != null) {
+                String name = localVariable.getName();
+                if(reservedJsKeywords.contains(name)){
+                    System.out.println(String.format("Appending _ to reserved JS keyword %s", name));
+                    sb.append(name + "_");
+                } else {
+                    sb.append(name);
+                }
+            } else {
+                // interface declarations will fallback to paramN since they don't have names in the bytecode
+                sb.append("param");
+                sb.append(idx);
+            }
+            idx++;
             sb.append(": ");
 
             String paramTypeName = getTypeScriptTypeFromJavaType(type, typeDefinition);
@@ -994,7 +1030,7 @@ public class DtsApi {
         
         sbContent.append(name + ": " + getTypeScriptTypeFromJavaType(this.getFieldType(f), typeDefinition));
         if (f.getConstantValue() != null) {
-            sbContent.appendln( " = " + f.getConstantValue() + ";");
+            sbContent.appendln( "; // " + f.getConstantValue());
         } else {
             sbContent.appendln(";");
 
@@ -1253,16 +1289,16 @@ public class DtsApi {
     }
 
     private void overrideFieldComparator() {
-        BCELComparator cmp = Field.getComparator();
+        BCELComparator<Field> cmp = Field.getComparator();
 
-        Field.setComparator(new BCELComparator() {
+        Field.setComparator(new BCELComparator<>() {
             @Override
-            public boolean equals(Object o, Object o1) {
-                return ((Field) o).getName().equals(((Field) o1).getName());
+            public boolean equals(Field o, Field o1) {
+                return o.getName().equals(o1.getName());
             }
 
             @Override
-            public int hashCode(Object o) {
+            public int hashCode(Field o) {
                 return cmp.hashCode(o);
             }
         });
