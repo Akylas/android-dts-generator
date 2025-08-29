@@ -59,9 +59,11 @@ public class Generator {
         if(inputGenericsFile != null){
             DtsApi.loadGenerics(inputGenericsFile);
         }
-
+        this.fileHelper.writeToFile("/* eslint-disable @typescript-eslint/unified-signatures */\n" +
+                "/* eslint-disable @typescript-eslint/adjacent-overload-signatures */\n" +
+                "/* eslint-disable no-redeclare */\n", this.outFileName, false);
         if(!this.skipDeclarations) {
-            this.fileHelper.writeToFile(String.format("/// <reference path=\"%s\"/>\n", this.declarationsFileName), this.outFileName, false);
+            this.fileHelper.writeToFile(String.format("/// <reference path=\"%s\"/>\n", this.declarationsFileName), this.outFileName, true);
         }
 
         while (ClassRepo.hasNext()) {
