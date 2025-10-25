@@ -46,6 +46,9 @@ import edu.umd.cs.findbugs.ba.generic.GenericUtilities;
 import java.util.Deque;
 import java.util.ArrayDeque;
 
+/**
+ * Created by plamen5kov on 6/17/16.
+ */
 public class DtsApi {
     public static List<Tuple<String, Integer>> externalGenerics = new ArrayList<>();
     public static List<Tuple<String, Integer>> generics = new ArrayList<>();
@@ -288,13 +291,7 @@ public class DtsApi {
             Arrays.sort(refs);
         }
 
-        String before = sbContent.toString();
-        String content = replaceIgnoredNamespaces(before);
-        if (!before.equals(content)) {
-            System.out.println("replaceIgnoredNamespaces changed content. (length before=" + before + " after=" + content + ")");
-            // optionally write both to disk / temp files for diffing
-        }
-        // String content = replaceIgnoredNamespaces(sbContent.toString());
+        String content = replaceIgnoredNamespaces(sbContent.toString());
 
         // Ensure braces are balanced (only append missing closing braces)
         content = balanceUnclosedBraces(content);
@@ -466,53 +463,6 @@ public class DtsApi {
         } catch (Exception e) {
             throw new Exception(String.format("%s in file %s", e.getMessage(), inputFile));
         }
-    }
-
-    /**
-     * Compatibility API: limited/safe replaceGenericsInText used by other steps/tools.
-     * Only appends "<any,...>" for classes we know are generic (from generics + externalGenerics).
-     */
-    public static String replaceGenericsInText(String content) {
-        String any = "any";
-        String result = content;
-
-        List<Tuple<String, Integer>> allGenerics = Stream.concat(generics.stream(), externalGenerics.stream()).collect(Collectors.toList());
-
-        for (Tuple<String, Integer> generic : allGenerics) {
-            result = replaceNonGenericUsage(result, generic.x, generic.y, any);
-            String globalAliasedClassName = getGlobalAliasedClassName(generic.x);
-            if (!generic.x.equals(globalAliasedClassName)) {
-                result = replaceNonGenericUsage(result, globalAliasedClassName, generic.y, any);
-            }
-        }
-
-        return result;
-    }
-
-    private static String replaceNonGenericUsage(String content, String className, Integer occurencies, String javalangObject) {
-        // AppendReplacement-based approach to avoid regex replacement pitfalls.
-        Pattern usedAsNonGenericPattern = Pattern.compile(className.replace(".", "\\.") + "(?<Suffix>[^a-zA-Z\\d\\.\\$\\<])");
-        Matcher matcher = usedAsNonGenericPattern.matcher(content);
-
-        if (!matcher.find())
-            return content;
-
-        List<String> arguments = new ArrayList<>();
-        for (int i = 0; i < occurencies; i++) {
-            arguments.add(javalangObject);
-        }
-        String classSuffix = "<" + String.join(",", arguments) + ">";
-
-        matcher.reset();
-        StringBuffer sb = new StringBuffer();
-        while (matcher.find()) {
-            String suffix = matcher.group("Suffix");
-            String replacement = className + classSuffix + suffix;
-            replacement = Matcher.quoteReplacement(replacement);
-            matcher.appendReplacement(sb, replacement);
-        }
-        matcher.appendTail(sb);
-        return sb.toString();
     }
 
     private String getExtendsLine(JavaClass currClass, TypeDefinition typeDefinition) {
@@ -817,6 +767,7 @@ public class DtsApi {
         for (String intface : interfaceNames) {
             JavaClass clazz1 = ClassRepo.findClass(intface);
 
+            // Added guard to prevent NullPointerExceptions in case libs are not provided - the dev can choose to include it and rerun the generator
             if (clazz1 == null) {
                 if (!warnedMissing.contains(intface)) {
                     warnedMissing.add(intface);
@@ -827,6 +778,7 @@ public class DtsApi {
 
             String className = clazz1.getClassName();
 
+            // TODO: Pete: Hardcoded until we figure out how to go around the 'type incompatible with Object' issue
             if (className.equals("java.util.Iterator") ||
                     className.equals("android.animation.TypeEvaluator") ||
                     className.equals("java.lang.Comparable") ||
@@ -871,6 +823,7 @@ public class DtsApi {
             return;
         }
 
+        // TODO: Pete: won't generate static initializers as invalid typescript properties
         if (clazz.isInterface() && name.equals("<clinit>")) {
             return;
         }
@@ -985,6 +938,7 @@ public class DtsApi {
         return types;
     }
 
+    // gets the full field type including generic types
     private Type getFieldType(Field f) {
         Signature signature = this.getSignature(f);
         if (signature != null) {
@@ -1001,6 +955,7 @@ public class DtsApi {
         return f.getType();
     }
 
+    // gets the full method return type including generic types
     private Type getReturnType(Method m) {
         Signature signature = this.getSignature(m);
         if (signature != null) {
@@ -1037,11 +992,13 @@ public class DtsApi {
 
         if (currClass != null) {
 
+            //get all base methods and method names
             while (true && currClass != null) {
                 boolean isJavaLangObject = currClass.getClassName().equals(DtsApi.JavaLangObject);
 
                 for (Method m : currClass.getMethods()) {
                     if (!m.isSynthetic() && (m.isPublic() || m.isProtected())) {
+                        // don't write empty constructor typings for java objects
                         if (isJavaLangObject && isConstructor(m)) {
                             continue;
                         }
