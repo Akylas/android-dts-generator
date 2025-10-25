@@ -465,6 +465,53 @@ public class DtsApi {
         }
     }
 
+    /**
+     * Compatibility API: limited/safe replaceGenericsInText used by other steps/tools.
+     * Only appends "<any,...>" for classes we know are generic (from generics + externalGenerics).
+     */
+    public static String replaceGenericsInText(String content) {
+        String any = "any";
+        String result = content;
+
+        List<Tuple<String, Integer>> allGenerics = Stream.concat(generics.stream(), externalGenerics.stream()).collect(Collectors.toList());
+
+        for (Tuple<String, Integer> generic : allGenerics) {
+            result = replaceNonGenericUsage(result, generic.x, generic.y, any);
+            String globalAliasedClassName = getGlobalAliasedClassName(generic.x);
+            if (!generic.x.equals(globalAliasedClassName)) {
+                result = replaceNonGenericUsage(result, globalAliasedClassName, generic.y, any);
+            }
+        }
+
+        return result;
+    }
+
+    private static String replaceNonGenericUsage(String content, String className, Integer occurencies, String javalangObject) {
+        // AppendReplacement-based approach to avoid regex replacement pitfalls.
+        Pattern usedAsNonGenericPattern = Pattern.compile(className.replace(".", "\\.") + "(?<Suffix>[^a-zA-Z\\d\\.\\$\\<])");
+        Matcher matcher = usedAsNonGenericPattern.matcher(content);
+
+        if (!matcher.find())
+            return content;
+
+        List<String> arguments = new ArrayList<>();
+        for (int i = 0; i < occurencies; i++) {
+            arguments.add(javalangObject);
+        }
+        String classSuffix = "<" + String.join(",", arguments) + ">";
+
+        matcher.reset();
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+            String suffix = matcher.group("Suffix");
+            String replacement = className + classSuffix + suffix;
+            replacement = Matcher.quoteReplacement(replacement);
+            matcher.appendReplacement(sb, replacement);
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+    }
+
     private String getExtendsLine(JavaClass currClass, TypeDefinition typeDefinition) {
         String override = this.extendsOverrides.get(currClass.getClassName());
         if (override != null) {
@@ -1279,7 +1326,6 @@ public class DtsApi {
             convertToTypeScriptType(elementType, typeDefinition, elemSb);
             tsType.append(elemSb.toString());
             tsType.append(">");
-            System.out.println(String.format("androidNative.Array. %s", tsType));
         } else if (type.equals(Type.STRING)) {
             tsType.append("string");
         } else if (isObjectType) {
