@@ -1207,22 +1207,22 @@ public class DtsApi {
         }
 
         String tabs = getTabs(this.indent + 1);
+
+        if (f.getConstantValue() != null) {
+            sbContent.appendln( tabs + "/**");
+            sbContent.appendln( tabs + "* "  + f.getConstantValue());
+            sbContent.appendln( tabs + "*/");
+        }
         sbContent.append(tabs + "public ");
         if (f.isStatic()) {
             sbContent.append("static ");
         }
-
+      
         if (!jsFieldPattern.matcher(name).matches()) {
             name = "\"" + name + "\"";
         }
+        sbContent.appendln(name + ": " + safeGetTypeScriptType(this.getFieldType(f), typeDefinition) + ";");
 
-        sbContent.append(name + ": " + safeGetTypeScriptType(this.getFieldType(f), typeDefinition));
-        if (f.getConstantValue() != null) {
-            sbContent.appendln( "; // " + f.getConstantValue());
-        } else {
-            sbContent.appendln(";");
-
-        }
     }
 
     private void addClassField(JavaClass clazz) {
