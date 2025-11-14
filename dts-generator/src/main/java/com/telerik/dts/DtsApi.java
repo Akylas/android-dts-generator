@@ -162,16 +162,33 @@ public class DtsApi {
 
                 String tabs = getTabs(this.indent);
 
-                // Special-case: Kotlin Companion inner object — emit as namespace merge instead of class
+                                // Special-case: Kotlin Companion inner object — emit as namespace merge instead of class
                 if ((simpleClassName.equals("Companion") || currClass.getClassName().endsWith("$Companion")) && currClass.getClassName().contains("$")) {
-                    // compute outer simple class name
+                    // compute parent and its simple name
                     String parentFull = currClass.getClassName().substring(0, currClass.getClassName().lastIndexOf("$"));
                     String[] parentParts = parentFull.replace('$', '.').split("\\.");
                     String outerSimple = parentParts[parentParts.length - 1];
 
-                    // collect members and emit them inside namespace merge: export namespace Outer { export namespace Companion { ... } }
-                    sbContent.appendln(tabs + "export namespace " + outerSimple + " {");
-                    sbContent.appendln(tabs + "\texport namespace Companion {");
+                    // Decide whether the outer namespace is already open.
+                    // We use namespaceStack (Deque<String>) that tracks currently opened namespaces.
+                    boolean outerAlreadyOpen = !namespaceStack.isEmpty() && namespaceStack.peekLast().equals(outerSimple);
+
+                    // Track whether we opened the outer namespace here so we close the correct number of braces later.
+                    boolean openedOuterHere = false;
+
+                    if (!outerAlreadyOpen) {
+                        // need to open the outer namespace first, then Companion
+                        sbContent.appendln(tabs + "export namespace " + outerSimple + " {");
+                        sbContent.appendln(tabs + "\texport namespace Companion {");
+                        openedOuterHere = true;
+                    } else {
+                        // outer namespace already exists in the stack; only open Companion inside it
+                        // Do not add an extra tab here because 'tabs' is already indented inside the outer namespace.
+                        sbContent.appendln(tabs + "export namespace Companion {");
+                    }
+
+                    // Deduplicate member emissions (some members may appear duplicated in getMembers)
+                    Set<String> seenMemberSigs = new HashSet<>();
 
                     List<FieldOrMethod> members = getMembers(currClass, getAllInterfaces(currClass));
                     for (FieldOrMethod member : members) {
@@ -183,6 +200,13 @@ public class DtsApi {
                             if (isConstructor(m)) {
                                 continue;
                             }
+
+                            String sig = getMethodFullSignature(m);
+                            if (seenMemberSigs.contains(sig)) {
+                                continue;
+                            }
+                            seenMemberSigs.add(sig);
+
                             String methodNameRaw = m.getName();
                             String methodNameForDecl = jsFieldPattern.matcher(methodNameRaw).matches() ? methodNameRaw : getMethodName(m);
 
@@ -191,24 +215,43 @@ public class DtsApi {
                             if (!isConstructor(m)) {
                                 returnType = ": " + safeGetTypeScriptType(this.getReturnType(m), typeDefinition);
                             }
-                            sbContent.appendln(tabs + "\t\tfunction " + methodNameForDecl + paramsSig + returnType + ";");
+
+                            // choose member indentation based on whether we opened outer here
+                            String memberIndent = openedOuterHere ? (tabs + "\t\t") : (tabs + "\t");
+                            sbContent.appendln(memberIndent + "function " + methodNameForDecl + paramsSig + returnType + ";");
                         } else if (member instanceof Field) {
                             Field f = (Field) member;
                             if (f.isSynthetic() || (!f.isPublic() && !f.isProtected())) {
                                 continue;
                             }
+
+                            String fieldSig = f.getName() + ":" + this.getFieldType(f).toString();
+                            if (seenMemberSigs.contains(fieldSig)) {
+                                continue;
+                            }
+                            seenMemberSigs.add(fieldSig);
+
                             String name = f.getName();
                             if (!jsFieldPattern.matcher(name).matches()) {
                                 name = "\"" + name + "\"";
                             }
                             String fType = safeGetTypeScriptType(this.getFieldType(f), typeDefinition);
-                            sbContent.appendln(tabs + "\t\tconst " + name + ": " + fType + ";");
+
+                            String memberIndent = openedOuterHere ? (tabs + "\t\t") : (tabs + "\t");
+                            sbContent.appendln(memberIndent + "const " + name + ": " + fType + ";");
                         }
                     }
 
-                    sbContent.appendln(tabs + "\t}");
-                    sbContent.appendln(tabs + "}");
-                    // don't emit the Companion class itself; we've emitted the namespace merge
+                    // Close Companion namespace (and outer namespace if we opened it here)
+                    // closing indentation must match how we opened
+                    if (openedOuterHere) {
+                        sbContent.appendln(tabs + "\t}");
+                        sbContent.appendln(tabs + "}");
+                    } else {
+                        sbContent.appendln(tabs + "}");
+                    }
+
+                    // Mark prevClass and continue (we don't emit the Companion class itself)
                     this.prevClass = currClass;
                     continue;
                 }
@@ -1653,35 +1696,79 @@ public class DtsApi {
 
     private static String sanitizeIdentifier(String orig, Set<String> existing, int maxLen) {
         if (orig == null) orig = "";
+
+        // Detect likely synthetic / Kotlin-generated parameter names:
+        // - Kotlin synthetic names often look like "<set-...>" or contain '-' characters.
+        // - Obfuscated or compiler-generated names may contain '$'.
+        // If the original name is "clean" (only letters/digits/underscore), treat it as a real name
+        // and do NOT aggressively truncate it to maxLen. We will still sanitize invalid chars,
+        // ensure it doesn't start with a digit, and deduplicate in scope.
+        boolean likelySynthetic = orig.startsWith("<") || orig.contains("-") || orig.contains("$") || orig.contains(">") || !orig.matches("^[A-Za-z0-9_]+$");
+
+        // Step 1: remove angle brackets that commonly appear in synthetic names
         String s = orig.replaceAll("[<>]", "");
+
+        // Step 2: replace invalid chars with underscore (this also converts '-' -> '_')
         s = s.replaceAll("[^A-Za-z0-9_]", "_");
+
+        // Step 3: collapse consecutive underscores and trim leading/trailing underscores
         s = s.replaceAll("_+", "_");
         s = s.replaceAll("^_+|_+$", "");
         if (s.isEmpty()) {
             s = "_param";
         }
+
+        // Step 4: if starts with digit, prefix underscore (valid TS identifier)
         if (s.matches("^[0-9].*")) {
             s = "_" + s;
         }
-        if (s.length() > maxLen) {
-            String hash = shortHash(orig);
-            int baseLen = Math.max(1, maxLen - 4);
-            String base = s.substring(0, baseLen);
-            s = base + "_" + hash;
+
+        // If the name looks synthetic, enforce maxLen (truncate + short hash suffix).
+        // If it looks like a real/meaningful identifier, avoid truncation: allow the original length.
+        if (likelySynthetic) {
+            if (s.length() > maxLen) {
+                String hash = shortHash(orig);
+                int baseLen = Math.max(1, maxLen - 4); // reserve '_' + 3 hex chars
+                String base = s.substring(0, baseLen);
+                s = base + "_" + hash; // final length <= maxLen
+            }
+        } else {
+            // keep full meaningful name (no truncation). However to be defensive, if it's absurdly long
+            // we still cap it to a much larger limit to avoid unlimited growth; but not the tiny maxLen.
+            int generousLimit = Math.max(maxLen, 128);
+            if (s.length() > generousLimit) {
+                String hash = shortHash(orig);
+                int baseLen = Math.max(1, generousLimit - 4);
+                String base = s.substring(0, baseLen);
+                s = base + "_" + hash;
+            }
         }
+
+        // Step 5: deduplicate within scope; append numeric suffixes as needed.
         if (existing != null) {
             String candidate = s;
             int i = 1;
             while (existing.contains(candidate)) {
                 String suffix = "_" + i;
-                int allowedBase = Math.max(1, maxLen - suffix.length());
-                String base = s.length() > allowedBase ? s.substring(0, allowedBase) : s;
-                candidate = base + suffix;
+                // If we previously didn't truncate (meaningful name) allow the new candidate to grow,
+                // but for synthetic names keep within maxLen.
+                if (likelySynthetic) {
+                    int allowedBase = Math.max(1, maxLen - suffix.length());
+                    String base = s.length() > allowedBase ? s.substring(0, allowedBase) : s;
+                    candidate = base + suffix;
+                } else {
+                    // for meaningful names allow adding suffix without aggressive truncation (but cap at generousLimit)
+                    int generousLimit = Math.max(maxLen, 128);
+                    int allowedBase = Math.max(1, generousLimit - suffix.length());
+                    String base = s.length() > allowedBase ? s.substring(0, allowedBase) : s;
+                    candidate = base + suffix;
+                }
                 i++;
             }
             s = candidate;
             existing.add(s);
         }
+
         return s;
     }
 
